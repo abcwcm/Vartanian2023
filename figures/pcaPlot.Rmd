@@ -1,0 +1,88 @@
+---
+title: PCA plot
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(limma))
+suppressMessages(library(edgeR))
+suppressMessages(library(dplyr))
+suppressMessages(library(genefilter))
+suppressMessages(library(RColorBrewer))
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+```
+
+
+
+
+```{r readInData, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(make.names(decoder.data$group))
+decoder.data$toxin <- factor(decoder.data$toxin, levels=c("PBS", "ETX", "PTX"))
+decoder.data$tissue <- factor(decoder.data$tissue)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+#table(colnames(counts) == decoder.data$sample.ID )
+```
+
+
+## Samples
+
+The following samples were part of this analysis:
+
+```{r samples, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data"}
+ kable(decoder.data[,c(-1)], row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+# PCA
+
+Principal component analysis (PCA) of the top 1000 most variable voom transformed genes across all samples.   Principal components 1 (PC1) and 2 (PC2) are shown, and the percent of transcriptional variation captured by each principal component is indicated.
+
+```{r pca,  message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data", fig.width=5, fig.width=5}
+dge <- DGEList(counts=counts)
+design = model.matrix(~ 0 + group, decoder.data)
+colnames(design) <- gsub("group", "", colnames(design))
+keep <- filterByExpr(dge, design)
+dge <- dge[keep,,keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+normCounts = cpm(dge, log=T)
+v <- voom(dge, design, plot=F)
+
+voom.counts <- v$E
+
+ntop = 1000
+Pvars <- rowVars((voom.counts))
+select <- order(Pvars, decreasing = TRUE)[seq_len(min(ntop, length(Pvars)))]
+PCA <- prcomp(t((voom.counts)[select, ]), scale = F)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], decoder.data)
+library(ggsci)
+library(ggthemes)
+
+p = qplot(PC1, PC2, data = dataGG, color=toxin, size=I(4),  main = "") + labs(x = paste0("PC1, VarExp: ", round(percentVar[1],4),"%"), y = paste0("PC2, VarExp: ", round(percentVar[2],4),"%")) + theme_bw(base_size=16) + theme(legend.position="bottom") + scale_color_manual(name="Treatment", values=c(rgb(142,78,137,maxColorValue = 255), rgb(201,66,53,maxColorValue = 255),  rgb(84,149,78,maxColorValue = 255) ))
+
+p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank())
+
+#p + ggalt::geom_encircle(data=dataGG,aes(group=toxin, fill = toxin), s_shape=0.8, expand=0.05, alpha=0.2, show.legend = F)  + scale_fill_colorblind()
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=TRUE,comment="#",echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

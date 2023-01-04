@@ -1,0 +1,156 @@
+---
+title: Venn + Scatterplot 
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(limma))
+suppressMessages(library(edgeR))
+suppressMessages(library(dplyr))
+suppressMessages(library(genefilter))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(gridExtra))
+suppressMessages(library(VennDiagram))
+suppressMessages(library(ggthemes))
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+```
+
+
+
+
+```{r readInData, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(make.names(decoder.data$group))
+decoder.data$toxin <- factor(decoder.data$toxin, levels=c("PBS", "ETX", "PTX"))
+decoder.data$tissue <- factor(decoder.data$tissue)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+#table(colnames(counts) == decoder.data$sample.ID )
+```
+
+
+## Samples
+
+The following samples were part of this analysis:
+
+```{r samples, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data"}
+ kable(decoder.data[,c(-1)], row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+
+# Differential expression analysis
+
+Based on the samples, the following pairwise comparisons were made via limma-voom:
+
+- spinal cord PTX vs. spinal cord (no toxin)
+- spinal cord ETX vs. spinal cord (no toxin)
+
+
+```{r runLimma,  eval=T, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE}
+dge <- DGEList(counts=counts)
+design = model.matrix(~ 0 + group, decoder.data)
+colnames(design) <- gsub("group", "", colnames(design))
+keep <- filterByExpr(dge, design)
+dge <- dge[keep,,keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+normCounts = cpm(dge, log=T)
+v <- voom(dge, design, plot=F)
+fit <- lmFit(v, design)
+cont.matrix <- makeContrasts(PTX.SC-CT.SC,
+                             ETX.SC-CT.SC,
+                             levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2)
+
+PTX.SC_vs_CT.SC <- topTable(fit2,coef=1,number=Inf)
+ETX.SC_vs_CT.SC <- topTable(fit2,coef=2,number=Inf)
+```
+
+
+The following genes were detected as differentially expresed (FDR < 0.10):
+
+```{r de_res, eval=T,  warning=FALSE, cache=TRUE, echo=FALSE}
+de.all = list(PTX.SC_vs_CT.SC = PTX.SC_vs_CT.SC,
+              ETX.SC_vs_CT.SC = ETX.SC_vs_CT.SC)
+alpha = 0.10
+
+de.all.sig <- lapply(de.all, subset, adj.P.Val < alpha)
+
+res =  as.data.frame(sapply(de.all.sig, nrow))
+colnames(res) <- paste0("padj<",alpha)
+
+
+all.comps = stringr::str_split(row.names(res), "_vs_")
+
+rel.contrs = 1:length(all.comps)
+ 
+kable(data.frame(res[rel.contrs,, drop=F], contr=rel.contrs), row.names=T,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+# Venn diagrams comparing PTX.SC_vs_CT.SC	 and ETX.SC_vs_CT.SC
+
+
+```{r venn, message=FALSE, warning=FALSE, eval=TRUE, cache=TRUE, echo=FALSE,  context="data", fig.align='center', fig.width=5, fig.height=5}
+library(venneuler)
+library(eulerr)
+
+ll = list("ETX vs. PBS" = row.names(subset(ETX.SC_vs_CT.SC, adj.P.Val < alpha)), "PTX vs. PBS" = row.names(subset(PTX.SC_vs_CT.SC, adj.P.Val < alpha)))
+
+p = plot(euler(ll),
+     fills =c(rgb(201,66,53,maxColorValue = 255), rgb(84,149,78,maxColorValue = 255)),
+     alpha=0.7,
+     edges = T,
+     quantities = list(fontsize = 18, just="center"), 
+     labels= list(fontsize = 18,  just="center"), adjust_labels=T)
+
+grid.arrange(p,ncol=1,padding=unit(0.9,"line"),top="",bottom="",right="",left="")
+
+```
+
+
+## Scatter plot comparing fold-changes of genes that are in the intersection
+
+
+```{r scatterplot, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, fig.width=6, fig.height=6, context="data",context="data"}
+PTX.SC_vs_CT.SC_sig = subset(PTX.SC_vs_CT.SC, adj.P.Val < alpha)
+colnames(PTX.SC_vs_CT.SC_sig) <- paste0("PTX.SC_vs_CT.SC_",colnames(PTX.SC_vs_CT.SC_sig))
+
+ETX.SC_vs_CT.SC_sig = subset(ETX.SC_vs_CT.SC, adj.P.Val < alpha)
+colnames(ETX.SC_vs_CT.SC_sig) <- paste0("ETX.SC_vs_CT.SC_",colnames(ETX.SC_vs_CT.SC_sig))
+
+merged_dfs_all = merge(PTX.SC_vs_CT.SC_sig, ETX.SC_vs_CT.SC_sig, by="row.names", all="TRUE")
+
+merged_dfs = merge(PTX.SC_vs_CT.SC_sig, ETX.SC_vs_CT.SC_sig, by="row.names")
+merged_dfs$meanLFC = rowMeans(merged_dfs[,c("PTX.SC_vs_CT.SC_logFC","ETX.SC_vs_CT.SC_logFC")])
+merged_dfs = merged_dfs[order(merged_dfs$meanLFC),]
+merged_dfs$gene = merged_dfs$Row.names
+merged_dfs$direction = ifelse(merged_dfs$meanLFC > 0, "up", "down")
+
+library(ggpubr)
+library(ggsci)
+
+
+ggplot(merged_dfs, aes(x=ETX.SC_vs_CT.SC_logFC, y=PTX.SC_vs_CT.SC_logFC, label=gene)) + geom_point(size=3, alpha=0.6, pch=21, color="black", aes(fill=direction)) + theme_bw(base_size = 16) + theme(legend.position =  "bottom") + scale_fill_aaas(name=bquote(log[2]~fold~change~direction)) + ggtitle("Scatter plot of fold-changes", subtitle="comparing changes induced in ETX/PTX relative to PBS") + xlab(bquote(log[2]~FC~(ETX - PBS))) +  ylab(bquote(log[2]~FC~(PTX - PBS))) +  stat_cor( aes(label = paste(..rr.label.., sep = "~`,`~")),label.x = -7) + geom_smooth(method=lm, se=T) + geom_vline(xintercept = 0, linetype="dotted", size=1)  + geom_hline(yintercept = 0, linetype="dotted", size=1)  +  theme(plot.subtitle=element_text(size=14, color="black"))
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=TRUE,comment="#",echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

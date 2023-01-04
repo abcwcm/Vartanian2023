@@ -1,0 +1,165 @@
+---
+title: Heatmaps of genes of interest 
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(limma))
+suppressMessages(library(edgeR))
+suppressMessages(library(dplyr))
+suppressMessages(library(genefilter))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(gridExtra))
+suppressMessages(library(VennDiagram))
+suppressMessages(library(ggthemes))
+suppressMessages(library(pheatmap))
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+```
+
+
+
+
+```{r readInData, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(make.names(decoder.data$group))
+decoder.data$Treatment <- factor(decoder.data$toxin, levels=c("PBS", "ETX", "PTX"))
+decoder.data$tissue <- factor(decoder.data$tissue)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+#table(colnames(counts) == decoder.data$sample.ID )
+```
+
+
+## Samples
+
+The following samples were part of this analysis:
+
+```{r samples, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE,  context="data"}
+ kable(decoder.data[,c(-1)], row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+
+# Differential expression analysis
+
+Based on the samples, the following pairwise comparisons were made via limma-voom:
+
+- spinal cord PTX vs. spinal cord (no Treatment)
+- spinal cord ETX vs. spinal cord (no Treatment)
+
+
+```{r runLimma,  eval=T, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE}
+dge <- DGEList(counts=counts)
+design = model.matrix(~ 0 + group, decoder.data)
+colnames(design) <- gsub("group", "", colnames(design))
+keep <- filterByExpr(dge, design)
+dge <- dge[keep,,keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+normCounts = cpm(dge, log=T)
+v <- voom(dge, design, plot=F)
+fit <- lmFit(v, design)
+cont.matrix <- makeContrasts(PTX.SC-CT.SC,
+                             ETX.SC-CT.SC,
+                             levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2)
+
+PTX.SC_vs_CT.SC <- topTable(fit2,coef=1,number=Inf)
+ETX.SC_vs_CT.SC <- topTable(fit2,coef=2,number=Inf)
+```
+
+
+The following genes were detected as differentially expresed (FDR < 0.10):
+
+```{r de_res, eval=T,  warning=FALSE, cache=TRUE, echo=FALSE}
+de.all = list(PTX.SC_vs_CT.SC = PTX.SC_vs_CT.SC,
+              ETX.SC_vs_CT.SC = ETX.SC_vs_CT.SC)
+alpha = 0.10
+
+de.all.sig <- lapply(de.all, subset, adj.P.Val < alpha)
+
+res =  as.data.frame(sapply(de.all.sig, nrow))
+colnames(res) <- paste0("padj<",alpha)
+
+
+all.comps = stringr::str_split(row.names(res), "_vs_")
+
+rel.contrs = 1:length(all.comps)
+ 
+kable(data.frame(res[rel.contrs,, drop=F], contr=rel.contrs), row.names=T,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+#  Heatmaps of genes of interest (Fig. 7E)
+
+heat map displaying genes of interest reveals induction of protease, signal transduction, cytokine, and transcription factor genes relevant to overcoming CNS immune privilege 
+
+```{r hm1, message=FALSE, warning=FALSE, eval=TRUE, cache=TRUE, echo=FALSE,  context="data", fig.align='center', fig.width=6, fig.height=6}
+
+goi = c("Ibtk","Vegfa","Pla2g7","Mmp2","Mmp25","Mmp28","Mmp17","Adamtsl1","Nup205","Cxcl16","Cxcl12","Tnfrsf22","Pik3ca","Adamts8","Adamts2","Adamts6","Adamts20","Ripk2","Casp7","Casp9","Casp2","Casp8","Timp2","Tlr3","Tlr4","Tlr2","IL17rb","IL17ra","IL27ra","IL3ra","Socs4","IL6","Irak4","Cd14","Traf1","Tirap","Notch2","Akt2","Pik3ca","Cdh2")
+goi = stringr::str_to_sentence(goi)
+#table(goi %in% row.names(counts))
+
+is_de = unique(unlist(lapply(de.all.sig, row.names)))
+
+goi = goi[goi %in% is_de]
+decod.sub = decoder.data
+annot_col =data.frame(Treatment=decod.sub$Treatment, row.names=decod.sub$sample.ID)
+samps = decod.sub$sample.ID
+log2.count.matrix = normCounts[goi,samps] %>% as.matrix()
+
+annoCol<-list(Treatment=c(PBS=rgb(142,78,137,maxColorValue = 255), ETX=rgb(201,66,53,maxColorValue = 255), PTX=rgb(84,149,78,maxColorValue = 255)))
+cols <- rev(colorRampPalette(brewer.pal(10, "RdBu"))(50))
+
+pheatmap(log2.count.matrix, scale="row", show_rownames=T, fontsize = 10, cellwidth =15, cellheight=9, main = "",  annotation_col = annot_col,color=cols, silent = F ,  cluster_cols = T, show_colnames = F, treeheight_col=0, treeheight_row=20,  annotation_colors = annoCol)
+```
+
+
+
+
+
+#  Heatmaps of genes of interest (Fig. 7f)
+
+we show a heat map of genes previously identified by Munji et al as components of a core set of genes involved in BBB dysfunction 
+
+(asterik = DE in one of the contrasts)
+
+```{r hm_2, message=FALSE, warning=FALSE, eval=TRUE, cache=TRUE, echo=FALSE,  context="data", fig.align='center', fig.width=6, fig.height=6}
+
+goi = c("Plekho1","Mycl","Sele","Upp1","Adamts8","Lamb1","Lrg1","Plekho2","Scgb3a1","Selp","Col3a1","Serpine1","Serping1","Serpina3g","Cenpa")
+goi = stringr::str_to_sentence(goi)
+
+is_de = unique(unlist(lapply(de.all.sig, row.names)))
+
+goi = goi[goi %in% is_de]
+decod.sub = decoder.data
+annot_col =data.frame(Treatment=decod.sub$Treatment, row.names=decod.sub$sample.ID)
+samps = decod.sub$sample.ID
+log2.count.matrix = normCounts[goi,samps] %>% as.matrix()
+
+pheatmap(log2.count.matrix, scale="row", show_rownames=T, fontsize = 10, cellwidth =15, cellheight = 15, main = "",  annotation_col = annot_col,color=cols, silent = F , cluster_cols = T, show_colnames = F, treeheight_col=0, treeheight_row=20, annotation_colors = annoCol)
+```
+
+
+
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=TRUE,comment="#",echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
